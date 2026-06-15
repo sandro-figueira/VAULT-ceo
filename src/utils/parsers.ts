@@ -113,7 +113,8 @@ export const parseDate = (raw: unknown): string => {
   // DD/MM/YYYY, DD-MM-YYYY, DD.MM.YY (Brazilian day-first).
   const dmy = s.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})/)
   if (dmy) {
-    let [, day, month, year] = dmy
+    const [, day, month] = dmy
+    let year = dmy[3]
     if (year.length === 2) year = Number(year) > 50 ? `19${year}` : `20${year}`
     const iso = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`
     const parsed = new Date(iso)
@@ -377,9 +378,8 @@ export const parseOFX = async (file: File): Promise<ImportedTransaction[]> => {
     const year = dateRaw.substring(0, 4)
     const month = dateRaw.substring(4, 6)
     const day = dateRaw.substring(6, 8)
-    let date: string
     const parsed = new Date(`${year}-${month}-${day}`)
-    date = isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString()
+    const date = isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString()
 
     const name = getValue('NAME') || ''
     const memo = getValue('MEMO') || ''
