@@ -109,6 +109,53 @@ describe('parseCSV', () => {
     expect(result[0]).toMatchObject({ amount: 500, type: 'income' })
     expect(result[1]).toMatchObject({ amount: 1500, type: 'expense' })
   })
+
+  it('detects the header even with metadata/preamble rows above it', async () => {
+    const csv = [
+      'Extrato Conta Corrente',
+      'Período: 01/01/2024 a 31/01/2024',
+      'Agência: 1234  Conta: 56789',
+      '',
+      'Data;Histórico;Valor',
+      '15/01/2024;Pagamento Fornecedor;-1.234,56',
+      '16/01/2024;Recebimento Cliente;2.000,00',
+    ].join('\n')
+
+    const result = await parseCSV(makeFile(csv, 'bradesco.csv'))
+    expect(result).toHaveLength(2)
+    expect(result[0]).toMatchObject({ amount: 1234.56, type: 'expense' })
+    expect(result[1]).toMatchObject({ amount: 2000, type: 'income' })
+  })
+
+  it('captures an account column and ignores empty lines', async () => {
+    const csv = [
+      'Data,Descrição,Valor,Conta',
+      '15/01/2024,Venda,500.00,Banco do Brasil',
+      '',
+      '16/01/2024,Aluguel,-1500.00,Banco do Brasil',
+    ].join('\n')
+
+    const result = await parseCSV(makeFile(csv, 'conta.csv'))
+    expect(result).toHaveLength(2)
+    expect(result[0].account).toBe('Banco do Brasil')
+  })
+
+  it('honors an explicit type column over an unsigned value', async () => {
+    const csv = [
+      'Data,Descrição,Valor,Tipo',
+      '15/01/2024,Compra,100.00,Débito',
+      '16/01/2024,Recebimento,200.00,Crédito',
+    ].join('\n')
+
+    const result = await parseCSV(makeFile(csv, 'tipo.csv'))
+    expect(result[0]).toMatchObject({ amount: 100, type: 'expense' })
+    expect(result[1]).toMatchObject({ amount: 200, type: 'income' })
+  })
+
+  it('rejects a file without recognizable date/value columns', async () => {
+    const csv = ['foo,bar,baz', '1,2,3'].join('\n')
+    await expect(parseCSV(makeFile(csv, 'aleatorio.csv'))).rejects.toThrow(/colunas de data e valor/)
+  })
 })
 
 describe('parseOFX', () => {
@@ -143,6 +190,24 @@ DATA:OFXSGML
     expect(result[0].description).toContain('Supermercado')
     expect(result[1]).toMatchObject({ amount: 2500, type: 'income', fitid: 'XYZ789' })
     expect(result[0].date.slice(0, 10)).toBe('2024-01-15')
+  })
+
+  it('rejects a non-OFX file with a friendly error', async () => {
+    await expect(parseOFX(makeFile('isto nao e um ofx', 'fake.ofx')))
+      .rejects.toThrow(/não parece ser um OFX válido/)
+  })
+
+  it('extracts the account id from the OFX header', async () => {
+    const ofx = `<OFX><BANKACCTFROM><BANKID>001<ACCTID>12345-6</BANKACCTFROM>
+<STMTTRN>
+<TRNTYPE>CREDIT
+<DTPOSTED>20240116
+<TRNAMT>10.00
+<FITID>F9
+<MEMO>Teste
+</STMTTRN></OFX>`
+    const result = await parseOFX(makeFile(ofx, 'conta.ofx'))
+    expect(result[0].account).toBe('001/12345-6')
   })
 
   it('honors TRNTYPE=DEBIT when amount is unsigned', async () => {

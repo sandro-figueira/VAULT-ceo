@@ -245,7 +245,7 @@ const Import = () => {
     setIsParsing(true)
 
     const allTransactions: ImportedTransaction[] = []
-    let errors = 0
+    const errorMessages: string[] = []
 
     for (const file of files) {
       try {
@@ -258,31 +258,34 @@ const Import = () => {
           transactions = await parseOFX(file)
         } else if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
           transactions = await parseXLSX(file)
+        } else {
+          throw new Error(`Formato não suportado: "${file.name}". Use OFX, CSV, XLS ou XLSX.`)
         }
 
+        if (transactions.length === 0) {
+          errorMessages.push(`Nenhuma transação encontrada em "${file.name}".`)
+        }
         allTransactions.push(...transactions)
-      } catch (err) {
-        console.error(`Erro ao parsear ${file.name}:`, err)
-        errors++
+      } catch (err: any) {
+        // Avoid logging file contents; only the friendly message is recorded.
+        errorMessages.push(err?.message || `Não foi possível processar "${file.name}".`)
       }
     }
 
     if (allTransactions.length === 0) {
       toast({
-        title: 'Nenhuma transação encontrada',
-        description: errors > 0
-          ? `${errors} arquivo(s) com erro. Verifique o formato.`
-          : 'Não foi possível ler transações dos arquivos.',
+        title: 'Nenhuma transação importada',
+        description: errorMessages[0] || 'Não foi possível ler transações dos arquivos.',
         variant: 'destructive',
       })
       setIsParsing(false)
       return
     }
 
-    if (errors > 0) {
+    if (errorMessages.length > 0) {
       toast({
-        title: 'Aviso',
-        description: `${errors} arquivo(s) com erro, mas ${allTransactions.length} transações foram lidas dos demais.`,
+        title: 'Alguns arquivos não foram lidos',
+        description: `${errorMessages[0]} ${allTransactions.length} transações foram lidas dos demais arquivos.`,
       })
     }
 
@@ -992,6 +995,12 @@ const Import = () => {
                       <span className="flex items-center gap-0.5 text-[10px] text-muted-foreground w-fit">
                         <Mail className="w-2.5 h-2.5 shrink-0" />
                         <span className="truncate max-w-[100px]">{accountLabel}</span>
+                      </span>
+                    )}
+                    {t.account && (
+                      <span className="flex items-center gap-0.5 text-[10px] text-muted-foreground w-fit" title={t.account}>
+                        <FileText className="w-2.5 h-2.5 shrink-0" />
+                        <span className="truncate max-w-[140px]">{t.account}</span>
                       </span>
                     )}
                     {t.anomaly && (

@@ -9,6 +9,7 @@ export interface ImportedTransaction {
   category: string
   fitid?: string
   source_id?: string
+  account?: string       // bank/account identifier detected from the file (OFX ACCTID, "Conta" column…)
   confidence?: 'high' | 'medium' | 'low'
   installment?: { current: number; total: number }
   isRecurring?: boolean
@@ -24,28 +25,6 @@ export interface ImportedTransaction {
 /** Normalize a header/key for accent- and case-insensitive comparison. */
 const normalizeKey = (key: string): string =>
   key.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim()
-
-/**
- * Pick the first matching field from a row, comparing keys case- and
- * accent-insensitively. Bank exports vary wildly in header casing/spelling
- * ("Valor", "valor", "VALOR", "Data Transação", "Histórico"…), so an exact
- * key lookup misses most of them.
- */
-const pickField = (row: Record<string, any>, candidates: string[]): any => {
-  const keys = Object.keys(row)
-  for (const candidate of candidates) {
-    const target = normalizeKey(candidate)
-    for (const key of keys) {
-      if (normalizeKey(key) === target) {
-        const value = row[key]
-        if (value !== undefined && value !== null && String(value).trim() !== '') {
-          return value
-        }
-      }
-    }
-  }
-  return undefined
-}
 
 /**
  * Parse a monetary value coming from CSV/XLSX into a signed number.
@@ -153,43 +132,138 @@ export const parseDate = (raw: unknown): string => {
   return isNaN(fallback.getTime()) ? new Date().toISOString() : fallback.toISOString()
 }
 
-// Common column-name candidates across pt-BR / en bank & fintech exports.
-const AMOUNT_FIELDS = ['amount', 'valor', 'quantia', 'value', 'vlr', 'montante', 'preço', 'preco']
-const DATE_FIELDS = [
-  'date', 'data', 'data transação', 'data transacao', 'data lançamento',
-  'data lancamento', 'data movimento', 'dt', 'data da compra', 'data compra',
-]
+// ──────────────────────────────────────────────────────────────────────────
+// Automatic column detection (tolerant to metadata rows before the header)
+// ──────────────────────────────────────────────────────────────────────────
+
+// Logical field a spreadsheet/CSV column maps to.
+type FieldKind = 'date' | 'amount' | 'credit' | 'debit' | 'description' | 'account' | 'type'
+
+// Column-name candidates across pt-BR / en bank & fintech exports.
+// "Prefix" lists match when the header starts with the candidate (so "Valor (R$)"
+// or "Data Lançamento" are recognized). "Exact" lists must match the whole header
+// to avoid false positives (e.g. a "Pagamento" column matching "pago").
+const DATE_FIELDS = ['date', 'data', 'dt', 'competencia', 'vencimento']
+const AMOUNT_FIELDS = ['amount', 'valor', 'quantia', 'value', 'vlr', 'montante', 'preco', 'total']
 const DESCRIPTION_FIELDS = [
-  'description', 'descrição', 'descricao', 'memo', 'histórico', 'historico',
-  'lançamento', 'lancamento', 'title', 'título', 'titulo', 'detalhes',
-  'estabelecimento', 'nome', 'observação', 'observacao',
+  'description', 'descricao', 'memo', 'historico', 'lancamento', 'title', 'titulo',
+  'detalhes', 'estabelecimento', 'nome', 'observacao', 'referencia', 'beneficiario', 'favorecido',
 ]
-const CREDIT_FIELDS = ['crédito', 'credito', 'credit', 'entrada', 'receita', 'recebido']
-const DEBIT_FIELDS = ['débito', 'debito', 'debit', 'saída', 'saida', 'despesa', 'pago']
+const CREDIT_FIELDS = ['credito', 'credit', 'entrada', 'receita', 'recebido', 'creditos']
+const DEBIT_FIELDS = ['debito', 'debit', 'saida', 'despesa', 'pago', 'debitos']
+const ACCOUNT_FIELDS = ['conta', 'account', 'conta corrente', 'agencia/conta', 'ag/conta', 'numero da conta']
+const TYPE_FIELDS = ['tipo', 'type', 'natureza', 'd/c', 'c/d', 'debito/credito', 'entrada/saida', 'operacao']
+
+const startsWithAny = (n: string, list: string[]): boolean =>
+  list.some((c) => { const cn = normalizeKey(c); return n === cn || n.startsWith(cn) })
+const equalsAny = (n: string, list: string[]): boolean =>
+  list.some((c) => n === normalizeKey(c))
+
+/** Map a header cell to a logical field, or null when it isn't recognized. */
+const classifyHeader = (raw: unknown): FieldKind | null => {
+  const n = normalizeKey(String(raw ?? ''))
+  if (!n) return null
+  if (n.includes('saldo')) return null            // running balance — never the amount
+  if (startsWithAny(n, DATE_FIELDS)) return 'date'
+  if (equalsAny(n, CREDIT_FIELDS)) return 'credit'
+  if (equalsAny(n, DEBIT_FIELDS)) return 'debit'
+  if (startsWithAny(n, AMOUNT_FIELDS)) return 'amount'
+  if (equalsAny(n, ACCOUNT_FIELDS)) return 'account'
+  if (equalsAny(n, TYPE_FIELDS)) return 'type'
+  if (startsWithAny(n, DESCRIPTION_FIELDS)) return 'description'
+  return null
+}
+
+// A row already mapped to logical fields.
+interface NormalizedRow {
+  date?: any; amount?: any; credit?: any; debit?: any
+  description?: any; account?: any; type?: any
+}
+
+const isEmptyRow = (cells: any[]): boolean =>
+  !cells || cells.every((c) => c === null || c === undefined || String(c).trim() === '')
 
 /**
- * Turn a parsed CSV/XLSX row into an ImportedTransaction (or null to skip it).
+ * Locate the header row in a matrix (array of rows). Many bank exports prepend
+ * title/period/account metadata before the real header, so we can't assume row 0.
+ * The header is the first row that exposes both a date column and a value column.
+ */
+const findHeaderRow = (matrix: any[][]): number => {
+  const limit = Math.min(matrix.length, 30)
+  for (let i = 0; i < limit; i++) {
+    const kinds = (matrix[i] || []).map(classifyHeader)
+    const hasDate = kinds.includes('date')
+    const hasValue = kinds.includes('amount') || kinds.includes('credit') || kinds.includes('debit')
+    if (hasDate && hasValue) return i
+    if (hasDate && kinds.includes('description') && kinds.filter(Boolean).length >= 2) return i
+  }
+  return -1
+}
+
+/**
+ * Convert a raw matrix (CSV/XLSX as array-of-arrays) into normalized rows by
+ * auto-detecting the header. Returns null when no usable header (date + value)
+ * is found, so callers can surface a friendly error.
+ */
+export const matrixToNormalizedRows = (matrix: any[][]): NormalizedRow[] | null => {
+  const rows = (matrix || []).filter((r) => Array.isArray(r) && !isEmptyRow(r))
+  if (rows.length === 0) return []
+
+  const headerRow = findHeaderRow(rows)
+  if (headerRow === -1) return null
+
+  const kinds = rows[headerRow].map(classifyHeader)
+  const out: NormalizedRow[] = []
+
+  for (let i = headerRow + 1; i < rows.length; i++) {
+    const cells = rows[i]
+    if (isEmptyRow(cells)) continue              // ignore blank lines
+
+    const norm: NormalizedRow = {}
+    kinds.forEach((kind, idx) => {
+      if (!kind) return
+      const value = cells[idx]
+      if (value === undefined || value === null || String(value).trim() === '') return
+      if (kind === 'description') {
+        // Multiple description columns get concatenated for a richer label.
+        norm.description = [norm.description, value].filter((v) => v != null && String(v).trim() !== '').join(' ')
+      } else if (norm[kind] === undefined) {
+        norm[kind] = value
+      }
+    })
+    out.push(norm)
+  }
+
+  return out
+}
+
+/**
+ * Turn a normalized row into an ImportedTransaction (or null to skip it).
  * Shared by parseCSV and parseXLSX so both formats behave identically.
  */
-const rowToTransaction = (row: Record<string, any>): ImportedTransaction | null => {
+const rowToTransaction = (row: NormalizedRow): ImportedTransaction | null => {
   // Single amount column first; fall back to separate credit/debit columns.
-  let amount = parseAmount(pickField(row, AMOUNT_FIELDS))
+  let amount = parseAmount(row.amount)
   if (amount === null) {
-    const credit = parseAmount(pickField(row, CREDIT_FIELDS))
-    const debit = parseAmount(pickField(row, DEBIT_FIELDS))
+    const credit = parseAmount(row.credit)
+    const debit = parseAmount(row.debit)
     if (credit !== null && credit !== 0) amount = Math.abs(credit)
     else if (debit !== null && debit !== 0) amount = -Math.abs(debit)
   }
 
   if (amount === null || amount === 0) return null
 
-  const date = parseDate(pickField(row, DATE_FIELDS))
+  // An explicit type/nature column overrides the sign when the amount is unsigned.
+  if (amount > 0 && row.type != null) {
+    const tn = normalizeKey(String(row.type))
+    if (/^(d|debito|saida|despesa|debit)/.test(tn)) amount = -amount
+  }
 
-  const descRaw = pickField(row, DESCRIPTION_FIELDS)
-  const description = (descRaw !== undefined ? String(descRaw) : 'Sem descrição').trim() || 'Sem descrição'
-
+  const date = parseDate(row.date)
+  const description = (row.description != null ? String(row.description) : '').trim() || 'Sem descrição'
   const type: 'income' | 'expense' = amount < 0 ? 'expense' : 'income'
   const category = categorizeTransaction(description, type)
+  const account = row.account != null && String(row.account).trim() !== '' ? String(row.account).trim() : undefined
 
   return {
     date,
@@ -197,6 +271,7 @@ const rowToTransaction = (row: Record<string, any>): ImportedTransaction | null 
     description,
     type,
     category,
+    account,
     raw: row,
   }
 }
@@ -225,12 +300,22 @@ const readFileAsText = async (file: File): Promise<string> => {
 
 export const parseCSV = (file: File): Promise<ImportedTransaction[]> => {
   return new Promise((resolve, reject) => {
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
+    // Parse without a header so we can locate the real header ourselves —
+    // many bank CSVs prepend title/period/account metadata rows.
+    Papa.parse<string[]>(file, {
+      header: false,
+      skipEmptyLines: 'greedy',
       complete: (results) => {
         try {
-          const transactions = (results.data as Record<string, any>[])
+          const rows = matrixToNormalizedRows(results.data as any[][])
+          if (rows === null) {
+            reject(new Error(
+              `Não encontramos colunas de data e valor em "${file.name}". ` +
+              `Confira se o arquivo é um extrato bancário válido.`
+            ))
+            return
+          }
+          const transactions = rows
             .map(rowToTransaction)
             .filter(Boolean) as ImportedTransaction[]
           resolve(transactions)
@@ -238,8 +323,8 @@ export const parseCSV = (file: File): Promise<ImportedTransaction[]> => {
           reject(error)
         }
       },
-      error: (error) => {
-        reject(error)
+      error: () => {
+        reject(new Error(`Não foi possível ler o arquivo CSV "${file.name}". Ele pode estar corrompido.`))
       },
     })
   })
@@ -247,6 +332,16 @@ export const parseCSV = (file: File): Promise<ImportedTransaction[]> => {
 
 export const parseOFX = async (file: File): Promise<ImportedTransaction[]> => {
   const text = await readFileAsText(file)
+
+  if (!/<OFX[\s>]/i.test(text) && !/<STMTTRN>/i.test(text)) {
+    throw new Error(`O arquivo "${file.name}" não parece ser um OFX válido.`)
+  }
+
+  // Account identifier from the statement header (BANKACCTFROM/CCACCTFROM).
+  const acctId = text.match(/<ACCTID>([^<\r\n]+)/i)?.[1]?.trim()
+  const bankId = text.match(/<BANKID>([^<\r\n]+)/i)?.[1]?.trim()
+  const account = acctId ? (bankId ? `${bankId}/${acctId}` : acctId) : undefined
+
   const transactions: ImportedTransaction[] = []
 
   // Split on the opening tag so we tolerate files that omit the closing
@@ -304,6 +399,7 @@ export const parseOFX = async (file: File): Promise<ImportedTransaction[]> => {
       type,
       category,
       fitid,
+      account,
       raw: chunk,
     })
   }
@@ -315,16 +411,26 @@ export const parseXLSX = async (file: File): Promise<ImportedTransaction[]> => {
   const { read, utils } = await import('xlsx')
 
   const buffer = await file.arrayBuffer()
-  const workbook = read(buffer, { type: 'array' })
+  let workbook
+  try {
+    workbook = read(buffer, { type: 'array' })
+  } catch {
+    throw new Error(`Não foi possível ler a planilha "${file.name}". O arquivo pode estar corrompido.`)
+  }
 
   // Use the first sheet.
   const sheetName = workbook.SheetNames[0]
-  if (!sheetName) throw new Error('Planilha vazia')
+  if (!sheetName) throw new Error(`A planilha "${file.name}" está vazia.`)
 
   const sheet = workbook.Sheets[sheetName]
-  const rows = utils.sheet_to_json<Record<string, any>>(sheet)
+  // Read as a matrix (raw values) so we can auto-detect the header even when
+  // the sheet has title/metadata rows above it, and keep numbers/dates intact.
+  const matrix = utils.sheet_to_json<any[]>(sheet, { header: 1, raw: true, blankrows: false })
 
-  if (rows.length === 0) throw new Error('Nenhuma linha encontrada na planilha')
+  const rows = matrixToNormalizedRows(matrix)
+  if (rows === null) {
+    throw new Error(`Não encontramos colunas de data e valor na planilha "${file.name}".`)
+  }
 
   return rows
     .map(rowToTransaction)
