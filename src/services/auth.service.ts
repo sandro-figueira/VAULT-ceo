@@ -1,79 +1,75 @@
 // Authentication Service
-import { supabase } from '@/lib/supabase'
+import { supabase, setRememberSession } from '@/lib/supabase'
 import type { SignupInput, LoginInput } from '@/lib/validations'
 import type { User } from '@/types'
 
 export const authService = {
   /**
-   * Sign up a new user
+   * Sign up a new user (email + password).
+   * The full name is sent as user metadata so the database trigger can persist
+   * it onto the profile row automatically.
    */
   async signup(data: SignupInput) {
     const { email, password, fullName, companyName } = data
 
-    // Create auth user
     const { data: authData, error: authError } = await supabase.auth.signUp({
       email,
       password,
+      options: {
+        // Stored on auth.users.raw_user_meta_data → read by handle_new_user().
+        data: { full_name: fullName ?? null, company_name: companyName ?? null },
+        // Email-confirmation links return to the app on any environment.
+        emailRedirectTo: `${window.location.origin}/dashboard`,
+      },
     })
 
     if (authError) throw authError
 
-    // Update profile with additional info
+    // Best-effort: if the profile already exists (trigger ran), fill in extras.
     if (authData.user && (fullName || companyName)) {
       const { error: profileError } = await supabase
         .from('profiles')
-        .update({
-          full_name: fullName,
-          company_name: companyName,
-        } as any)
+        .update({ full_name: fullName, company_name: companyName } as any)
         .eq('id', authData.user.id)
-
-      if (profileError) console.error('Profile update error:', profileError)
+      if (profileError) console.error('Profile update error:', profileError.message)
     }
 
     return authData
   },
 
   /**
-   * Login user
+   * Login with email + password.
+   * @param remember when false, the session is kept only for the browser session.
    */
-  async login(data: LoginInput) {
+  async login(data: LoginInput, remember = true) {
     const { email, password } = data
 
-    console.log('Attempting login for:', email)
+    // Must run BEFORE sign-in so the session token is written to the chosen storage.
+    setRememberSession(remember)
+
     const { data: authData, error } = await supabase.auth.signInWithPassword({
       email,
       password,
     })
 
-    if (error) {
-      console.error('Login error:', error)
-      throw error
-    }
-
-    console.log('Login successful', authData)
+    if (error) throw error
     return authData
   },
 
   /**
-   * Login with Google
+   * Login with Google (optional — the app works fully without it).
    */
   async loginWithGoogle() {
+    setRememberSession(true)
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        // Land on a dedicated callback page (NOT a protected route) so the PKCE
-        // code is exchanged deterministically before any auth guard runs.
         // origin-based → works on localhost and on the Vercel domain alike.
-        redirectTo: `${window.location.origin}/auth/callback`
-      }
+        redirectTo: `${window.location.origin}/dashboard`,
+      },
     })
 
-    if (error) {
-      console.error('Google login error:', error)
-      throw error
-    }
-
+    if (error) throw error
     return data
   },
 

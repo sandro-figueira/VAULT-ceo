@@ -4,6 +4,7 @@ import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { AuthProvider } from "@/contexts/AuthContext";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { LoadingFallback } from "@/components/LoadingFallback";
@@ -21,7 +22,8 @@ const Profile = lazy(() => import("./pages/Profile"));
 const TaxDashboard = lazy(() => import("./pages/TaxDashboard"));
 const Import = lazy(() => import("./pages/Import"));
 const OAuthGmailCallback = lazy(() => import("./pages/OAuthGmailCallback"));
-const AuthCallback = lazy(() => import("./pages/AuthCallback"));
+const ForgotPassword = lazy(() => import("./pages/ForgotPassword"));
+const ResetPassword = lazy(() => import("./pages/ResetPassword"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 
 // Prefetch critical routes after initial paint (Landing → Simulator → Results → Signup)
@@ -64,13 +66,15 @@ const App = () => (
           v7_relativeSplatPath: true,
         }}
       >
+        <AuthProvider>
         <PageViewTracker>
         <Suspense fallback={<LoadingFallback />}>
           <Routes>
             <Route path="/" element={<Onboarding />} />
             <Route path="/signup" element={<Signup />} />
             <Route path="/login" element={<Login />} />
-            <Route path="/auth/callback" element={<AuthCallback />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
+            <Route path="/reset-password" element={<ResetPassword />} />
             <Route path="/simulator" element={<Simulator />} />
             <Route path="/results" element={<Results />} />
             <Route path="/success" element={<Success />} />
@@ -114,6 +118,7 @@ const App = () => (
           </Routes>
         </Suspense>
         </PageViewTracker>
+        </AuthProvider>
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>

@@ -90,6 +90,42 @@ export const loginSchema = z.object({
 export type SignupInput = z.infer<typeof signupSchema>
 export type LoginInput = z.infer<typeof loginSchema>
 
+// Signup form (UI) — adds required full name + password confirmation.
+export const signupFormSchema = z
+  .object({
+    fullName: z
+      .string({ required_error: 'Nome é obrigatório' })
+      .min(2, 'Informe seu nome completo'),
+    email: z.string({ required_error: 'E-mail é obrigatório' }).email('E-mail inválido'),
+    password: z
+      .string({ required_error: 'Senha é obrigatória' })
+      .min(6, 'A senha deve ter pelo menos 6 caracteres')
+      .max(100, 'Senha muito longa'),
+    confirmPassword: z.string({ required_error: 'Confirme a senha' }),
+  })
+  .refine((d) => d.password === d.confirmPassword, {
+    message: 'As senhas não coincidem',
+    path: ['confirmPassword'],
+  })
+
+export type SignupFormInput = z.infer<typeof signupFormSchema>
+
+// Reset-password form — new password + confirmation.
+export const resetPasswordSchema = z
+  .object({
+    password: z
+      .string({ required_error: 'Senha é obrigatória' })
+      .min(6, 'A senha deve ter pelo menos 6 caracteres')
+      .max(100, 'Senha muito longa'),
+    confirmPassword: z.string({ required_error: 'Confirme a senha' }),
+  })
+  .refine((d) => d.password === d.confirmPassword, {
+    message: 'As senhas não coincidem',
+    path: ['confirmPassword'],
+  })
+
+export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>
+
 // Categories
 export const TRANSACTION_CATEGORIES = [
   'Vendas',
