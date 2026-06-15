@@ -93,6 +93,19 @@ const Import = () => {
   const { createTransactions } = useTransactions(user?.id)
 
   const ACCEPTED_EXTENSIONS = ['.csv', '.ofx', '.xlsx', '.xls', '.pdf']
+  // MIME types are added to the picker's `accept` because bank exports arrive with
+  // wildly inconsistent (or empty) types; listing both extensions and MIME types
+  // stops the OS file dialog from greying out valid OFX/CSV/XLS files.
+  const ACCEPTED_MIME_TYPES = [
+    'application/pdf',
+    'text/csv',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/x-ofx',
+    'application/ofx',
+    'text/plain',
+  ]
+  const FILE_ACCEPT_ATTR = [...ACCEPTED_EXTENSIONS, ...ACCEPTED_MIME_TYPES].join(',')
 
   const refreshAccounts = async (): Promise<GmailAccount[]> => {
     if (!user?.id) return []
@@ -776,7 +789,7 @@ const Import = () => {
                 <input
                   type="file"
                   multiple
-                  accept=".csv,.ofx,.xlsx,.xls,.pdf"
+                  accept={FILE_ACCEPT_ATTR}
                   className="hidden"
                   id="file-upload"
                   onChange={handleFileSelect}
