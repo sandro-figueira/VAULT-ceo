@@ -21,6 +21,7 @@ const Profile = lazy(() => import("./pages/Profile"));
 const TaxDashboard = lazy(() => import("./pages/TaxDashboard"));
 const Import = lazy(() => import("./pages/Import"));
 const OAuthGmailCallback = lazy(() => import("./pages/OAuthGmailCallback"));
+const AuthCallback = lazy(() => import("./pages/AuthCallback"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 
 // Prefetch critical routes after initial paint (Landing → Simulator → Results → Signup)
@@ -69,6 +70,7 @@ const App = () => (
             <Route path="/" element={<Onboarding />} />
             <Route path="/signup" element={<Signup />} />
             <Route path="/login" element={<Login />} />
+            <Route path="/auth/callback" element={<AuthCallback />} />
             <Route path="/simulator" element={<Simulator />} />
             <Route path="/results" element={<Results />} />
             <Route path="/success" element={<Success />} />

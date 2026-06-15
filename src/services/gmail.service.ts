@@ -14,7 +14,9 @@ export const gmailService = {
       provider: 'google',
       options: {
         scopes: 'https://www.googleapis.com/auth/gmail.readonly',
-        redirectTo: `${import.meta.env.VITE_APP_URL || window.location.origin}/import`,
+        // Always use the live origin. Relying on VITE_APP_URL risked redirecting
+        // to http://localhost:8080 in production if that env var leaked into Vercel.
+        redirectTo: `${window.location.origin}/import`,
         queryParams: {
           access_type: 'offline',
           prompt: 'consent',

@@ -62,7 +62,10 @@ export const authService = {
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        redirectTo: `${window.location.origin}/dashboard`
+        // Land on a dedicated callback page (NOT a protected route) so the PKCE
+        // code is exchanged deterministically before any auth guard runs.
+        // origin-based → works on localhost and on the Vercel domain alike.
+        redirectTo: `${window.location.origin}/auth/callback`
       }
     })
 

@@ -39,6 +39,9 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
         } else if (event === 'SIGNED_OUT') {
           setIsAuthenticated(false)
         } else if (event === 'INITIAL_SESSION') {
+          // Don't bounce to /signup while an OAuth code/token is still being
+          // exchanged — wait for the resulting SIGNED_IN event.
+          if (!session && isOAuthCallbackInProgress()) return
           setIsAuthenticated(!!session)
         }
       }
