@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -8,6 +8,8 @@ import {
 } from 'lucide-react'
 import { useToast } from '@/hooks/use-toast'
 import { parseCSV, parseOFX, parseXLSX, type ImportedTransaction } from '@/utils/parsers'
+import { parsePDF, PdfPasswordRequiredError, PdfPasswordIncorrectError } from '@/utils/pdfParser'
+import { PdfPasswordDialog } from '@/components/PdfPasswordDialog'
 import { useTransactions } from '@/hooks/useTransactions'
 import { useAuth } from '@/hooks/useAuth'
 import { TRANSACTION_CATEGORIES } from '@/lib/validations'
@@ -78,12 +80,32 @@ const Import = () => {
   )
   const [previewFilter, setPreviewFilter] = useState<'all' | 'review'>('all')
   const [accountFilter, setAccountFilter] = useState<string>('all')
+  // Password-protected PDF flow. The password is held only transiently inside
+  // the dialog component and passed straight to parsePDF — never stored here.
+  const [pdfQueue, setPdfQueue] = useState<File[]>([])
+  const [pdfError, setPdfError] = useState<string | null>(null)
+  const [pdfUnlocking, setPdfUnlocking] = useState(false)
+  // Accumulates parsed transactions/errors while locked PDFs are unlocked one by one.
+  const pendingRef = useRef<{ txs: ImportedTransaction[]; errors: string[] }>({ txs: [], errors: [] })
   const { toast } = useToast()
   const navigate = useNavigate()
   const { user } = useAuth()
   const { createTransactions } = useTransactions(user?.id)
 
-  const ACCEPTED_EXTENSIONS = ['.csv', '.ofx', '.xlsx', '.xls']
+  const ACCEPTED_EXTENSIONS = ['.csv', '.ofx', '.xlsx', '.xls', '.pdf']
+  // MIME types are added to the picker's `accept` because bank exports arrive with
+  // wildly inconsistent (or empty) types; listing both extensions and MIME types
+  // stops the OS file dialog from greying out valid OFX/CSV/XLS files.
+  const ACCEPTED_MIME_TYPES = [
+    'application/pdf',
+    'text/csv',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/x-ofx',
+    'application/ofx',
+    'text/plain',
+  ]
+  const FILE_ACCEPT_ATTR = [...ACCEPTED_EXTENSIONS, ...ACCEPTED_MIME_TYPES].join(',')
 
   const refreshAccounts = async (): Promise<GmailAccount[]> => {
     if (!user?.id) return []
@@ -226,7 +248,7 @@ const Import = () => {
     if (validFiles.length !== droppedFiles.length) {
       toast({
         title: 'Arquivo inválido',
-        description: 'Apenas arquivos .csv, .ofx e .xlsx são aceitos.',
+        description: 'Apenas arquivos .csv, .ofx, .xlsx, .xls e .pdf são aceitos.',
         variant: 'destructive',
       })
     }
@@ -240,12 +262,37 @@ const Import = () => {
     }
   }
 
+  // Builds the preview / shows errors once every file (incl. unlocked PDFs) is processed.
+  const finalizeParse = (acc: { txs: ImportedTransaction[]; errors: string[] }) => {
+    if (acc.txs.length === 0) {
+      toast({
+        title: 'Nenhuma transação importada',
+        description: acc.errors[0] || 'Não foi possível ler transações dos arquivos.',
+        variant: 'destructive',
+      })
+      setIsParsing(false)
+      return
+    }
+
+    if (acc.errors.length > 0) {
+      toast({
+        title: 'Alguns arquivos não foram lidos',
+        description: `${acc.errors[0]} ${acc.txs.length} transações foram lidas dos demais arquivos.`,
+      })
+    }
+
+    setParsedTransactions(acc.txs)
+    setSelectedIds(new Set(acc.txs.map((_, i) => i)))
+    setStep('preview')
+    setIsParsing(false)
+  }
+
   const parseFiles = async () => {
     if (files.length === 0) return
     setIsParsing(true)
 
-    const allTransactions: ImportedTransaction[] = []
-    let errors = 0
+    const acc = { txs: [] as ImportedTransaction[], errors: [] as string[] }
+    const lockedPdfs: File[] = []
 
     for (const file of files) {
       try {
@@ -258,38 +305,76 @@ const Import = () => {
           transactions = await parseOFX(file)
         } else if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
           transactions = await parseXLSX(file)
+        } else if (name.endsWith('.pdf')) {
+          // Try to open without a password first; if it's protected we'll prompt.
+          transactions = await parsePDF(file)
+        } else {
+          throw new Error(`Formato não suportado: "${file.name}". Use OFX, CSV, XLS, XLSX ou PDF.`)
         }
 
-        allTransactions.push(...transactions)
-      } catch (err) {
-        console.error(`Erro ao parsear ${file.name}:`, err)
-        errors++
+        if (transactions.length === 0) {
+          acc.errors.push(`Nenhuma transação encontrada em "${file.name}".`)
+        }
+        acc.txs.push(...transactions)
+      } catch (err: any) {
+        if (err instanceof PdfPasswordRequiredError) {
+          lockedPdfs.push(file) // ask for the password after the batch
+        } else {
+          // Avoid logging file contents; only the friendly message is recorded.
+          acc.errors.push(err?.message || `Não foi possível processar "${file.name}".`)
+        }
       }
     }
 
-    if (allTransactions.length === 0) {
-      toast({
-        title: 'Nenhuma transação encontrada',
-        description: errors > 0
-          ? `${errors} arquivo(s) com erro. Verifique o formato.`
-          : 'Não foi possível ler transações dos arquivos.',
-        variant: 'destructive',
-      })
+    pendingRef.current = acc
+
+    if (lockedPdfs.length > 0) {
+      // Pause and prompt for each protected PDF; finalize happens after the queue drains.
+      setPdfError(null)
+      setPdfQueue(lockedPdfs)
       setIsParsing(false)
       return
     }
 
-    if (errors > 0) {
-      toast({
-        title: 'Aviso',
-        description: `${errors} arquivo(s) com erro, mas ${allTransactions.length} transações foram lidas dos demais.`,
-      })
-    }
+    finalizeParse(acc)
+  }
 
-    setParsedTransactions(allTransactions)
-    setSelectedIds(new Set(allTransactions.map((_, i) => i)))
-    setStep('preview')
-    setIsParsing(false)
+  // Advance to the next locked PDF, or finalize when the queue is empty.
+  const advancePdfQueue = (current: File[]) => {
+    setPdfError(null)
+    const next = current.slice(1)
+    setPdfQueue(next)
+    if (next.length === 0) finalizeParse(pendingRef.current)
+  }
+
+  const handlePdfPasswordSubmit = async (password: string) => {
+    const file = pdfQueue[0]
+    if (!file) return
+    setPdfUnlocking(true)
+    setPdfError(null)
+    try {
+      const transactions = await parsePDF(file, password)
+      if (transactions.length === 0) {
+        pendingRef.current.errors.push(`Nenhuma transação encontrada em "${file.name}".`)
+      }
+      pendingRef.current.txs.push(...transactions)
+      advancePdfQueue(pdfQueue)
+    } catch (err: any) {
+      if (err instanceof PdfPasswordIncorrectError) {
+        setPdfError('Senha incorreta. Tente novamente.') // stay open, let the user retry
+      } else {
+        pendingRef.current.errors.push(err?.message || `Não foi possível ler "${file.name}".`)
+        advancePdfQueue(pdfQueue)
+      }
+    } finally {
+      setPdfUnlocking(false)
+    }
+  }
+
+  const handlePdfPasswordCancel = () => {
+    const file = pdfQueue[0]
+    if (file) pendingRef.current.errors.push(`Importação de "${file.name}" cancelada (PDF protegido).`)
+    advancePdfQueue(pdfQueue)
   }
 
   const saveEmailRule = async (
@@ -449,6 +534,14 @@ const Import = () => {
 
     return (
       <div className="container mx-auto p-4 md:p-6 space-y-6 animate-fade-in max-w-3xl">
+        <PdfPasswordDialog
+          open={pdfQueue.length > 0}
+          fileName={pdfQueue[0]?.name ?? ''}
+          error={pdfError}
+          loading={pdfUnlocking}
+          onSubmit={handlePdfPasswordSubmit}
+          onCancel={handlePdfPasswordCancel}
+        />
         <div className="flex flex-col gap-1">
           <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Importar Transações</h1>
           <p className="text-sm text-muted-foreground">
@@ -689,14 +782,14 @@ const Import = () => {
             </div>
             <h3 className="text-lg font-semibold mb-2">Arraste e solte seus arquivos aqui</h3>
             <p className="text-sm text-muted-foreground mb-6 text-center max-w-sm">
-              Suporta <strong>OFX</strong>, <strong>CSV</strong> e <strong>Excel (.xlsx)</strong>. Múltiplos arquivos de uma vez.
+              Suporta <strong>OFX</strong>, <strong>CSV</strong>, <strong>Excel (.xlsx/.xls)</strong> e <strong>PDF</strong> (inclusive protegido por senha). Múltiplos arquivos de uma vez.
             </p>
             <div className="flex gap-3">
               <div className="relative">
                 <input
                   type="file"
                   multiple
-                  accept=".csv,.ofx,.xlsx,.xls"
+                  accept={FILE_ACCEPT_ATTR}
                   className="hidden"
                   id="file-upload"
                   onChange={handleFileSelect}
@@ -714,6 +807,7 @@ const Import = () => {
               <span className="flex items-center gap-1"><FileText className="w-3 h-3" /> OFX</span>
               <span className="flex items-center gap-1"><FileText className="w-3 h-3" /> CSV</span>
               <span className="flex items-center gap-1"><FileSpreadsheet className="w-3 h-3" /> Excel</span>
+              <span className="flex items-center gap-1"><FileText className="w-3 h-3" /> PDF</span>
             </div>
           </CardContent>
         </Card>
@@ -992,6 +1086,12 @@ const Import = () => {
                       <span className="flex items-center gap-0.5 text-[10px] text-muted-foreground w-fit">
                         <Mail className="w-2.5 h-2.5 shrink-0" />
                         <span className="truncate max-w-[100px]">{accountLabel}</span>
+                      </span>
+                    )}
+                    {t.account && (
+                      <span className="flex items-center gap-0.5 text-[10px] text-muted-foreground w-fit" title={t.account}>
+                        <FileText className="w-2.5 h-2.5 shrink-0" />
+                        <span className="truncate max-w-[140px]">{t.account}</span>
                       </span>
                     )}
                     {t.anomaly && (
